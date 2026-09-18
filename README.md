@@ -21,6 +21,23 @@ Flipper Zero external app for testing CityCom-compatible elevator readers that u
 
 Automatic mode rotates the UID every 100 ms. The current UID and BCC are always shown on screen.
 
+## Interface preview
+
+<table>
+  <tr>
+    <td align="center"><strong>Manual mode</strong></td>
+    <td align="center"><strong>Automatic mode</strong></td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="img/manual_mode.png" alt="CityCom Fuzzer manual mode" width="400">
+    </td>
+    <td align="center">
+      <img src="img/auto_mode.png" alt="CityCom Fuzzer automatic mode" width="400">
+    </td>
+  </tr>
+</table>
+
 ## Observed security issue
 
 Some CityCom elevator readers show the following behavior for an unknown card UID:
