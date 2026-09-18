@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install uFBT
+        run: python -m pip install ufbt==0.2.6
+
+      - name: Select official F7 release SDK
+        run: python -m ufbt update --channel release --hw-target f7
+
+      - name: Run host protocol tests
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -I. \
+            citycom_fuzzer_protocol.c tests/test_protocol.c \
+            -o /tmp/citycom_fuzzer_protocol_test
+          /tmp/citycom_fuzzer_protocol_test
+
+      - name: Validate application icon
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from struct import unpack
+
+          data = Path("citycom_fuzzer.png").read_bytes()
+          assert data[:8] == b"\x89PNG\r\n\x1a\n"
+          width, height, bit_depth, color_type = unpack(">IIBB", data[16:26])
+          assert (width, height, bit_depth, color_type) == (10, 10, 1, 0)
+          PY
+
+      - name: Run uFBT lint
+        run: python -m ufbt lint
+
+      - name: Build FAP
+        run: python -m ufbt
