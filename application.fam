@@ -11,7 +11,7 @@ App(
         "nfc",
     ],
     fap_category="NFC",
-    fap_version="1.0",
+    fap_version="1.0.1",
     fap_description="MIFARE Classic 1K UID and BCC test app for CityCom-compatible systems",
     fap_author="Alexey",
     fap_icon="citycom_fuzzer.png",

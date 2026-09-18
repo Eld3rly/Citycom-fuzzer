@@ -16,7 +16,6 @@
 #include <nfc/nfc.h>
 #include <nfc/nfc_device.h>
 #include <nfc/nfc_listener.h>
-#include <nfc/protocols/iso14443_3a/iso14443_3a.h>
 #include <notification/notification_messages.h>
 #include <lib/nfc/protocols/mf_classic/mf_classic.h>
 
@@ -89,7 +88,7 @@ typedef struct {
     NotificationApp* notifications;
 
     Nfc* nfc;
-    NfcDevice* nfc_device;
+    MfClassicData* card_data;
     NfcListener* listener;
     bool listener_running;
 
@@ -107,7 +106,7 @@ typedef struct {
 } CitycomFuzzerApp;
 
 static void citycom_fuzzer_free(CitycomFuzzerApp* app);
-static void citycom_fuzzer_stop_listener(CitycomFuzzerApp* app);
+static void citycom_fuzzer_stop_listener(CitycomFuzzerApp* app, bool notify);
 
 static void
     citycom_fuzzer_set_status(CitycomFuzzerApp* app, CitycomFuzzerState state, const char* status) {
@@ -117,14 +116,6 @@ static void
 
 static void citycom_fuzzer_redraw(CitycomFuzzerApp* app) {
     view_port_update(app->view_port);
-}
-
-static MfClassicData* citycom_fuzzer_get_mf(CitycomFuzzerApp* app) {
-    if(!app->nfc_device) {
-        return NULL;
-    }
-
-    return (MfClassicData*)nfc_device_get_data(app->nfc_device, NfcProtocolMfClassic);
 }
 
 static void citycom_fuzzer_setup_card(MfClassicData* mf) {
@@ -150,7 +141,7 @@ static void citycom_fuzzer_setup_card(MfClassicData* mf) {
 }
 
 static bool citycom_fuzzer_read_card_info(CitycomFuzzerApp* app) {
-    MfClassicData* mf = citycom_fuzzer_get_mf(app);
+    MfClassicData* mf = app->card_data;
     if(!mf || !mf->iso14443_3a_data) {
         return false;
     }
@@ -192,17 +183,16 @@ static bool citycom_fuzzer_set_card_uid(MfClassicData* mf, const uint8_t* uid) {
 }
 
 static bool citycom_fuzzer_update_card_uid(CitycomFuzzerApp* app) {
-    MfClassicData* mf = citycom_fuzzer_get_mf(app);
-    if(!citycom_fuzzer_set_card_uid(mf, app->uid)) {
+    if(!citycom_fuzzer_set_card_uid(app->card_data, app->uid)) {
         return false;
     }
     return citycom_fuzzer_read_card_info(app);
 }
 
 static void citycom_fuzzer_release_nfc(CitycomFuzzerApp* app) {
-    if(app->nfc_device) {
-        nfc_device_free(app->nfc_device);
-        app->nfc_device = NULL;
+    if(app->card_data) {
+        mf_classic_free(app->card_data);
+        app->card_data = NULL;
     }
     if(app->nfc) {
         nfc_free(app->nfc);
@@ -211,11 +201,11 @@ static void citycom_fuzzer_release_nfc(CitycomFuzzerApp* app) {
 }
 
 static bool citycom_fuzzer_nfc_init(CitycomFuzzerApp* app) {
-    if(app->nfc && app->nfc_device) {
+    if(app->nfc && app->card_data) {
         return true;
     }
 
-    if(app->nfc || app->nfc_device) {
+    if(app->nfc || app->card_data) {
         citycom_fuzzer_release_nfc(app);
     }
 
@@ -226,24 +216,30 @@ static bool citycom_fuzzer_nfc_init(CitycomFuzzerApp* app) {
     }
 
     app->nfc = nfc_alloc();
-    app->nfc_device = nfc_device_alloc();
-    if(!app->nfc || !app->nfc_device) {
+    app->card_data = mf_classic_alloc();
+    NfcDevice* generated_device = nfc_device_alloc();
+    if(!app->nfc || !app->card_data || !generated_device) {
         FURI_LOG_E(CITYCOM_FUZZER_TAG, "NFC init failed");
+        if(generated_device) {
+            nfc_device_free(generated_device);
+        }
         citycom_fuzzer_release_nfc(app);
         citycom_fuzzer_set_status(app, CitycomFuzzerStateError, "NFC init failed");
         return false;
     }
 
-    nfc_data_generator_fill_data(NfcDataGeneratorTypeMfClassic1k_4b, app->nfc_device);
-    MfClassicData* mf = citycom_fuzzer_get_mf(app);
-    if(!mf) {
+    nfc_data_generator_fill_data(NfcDataGeneratorTypeMfClassic1k_4b, generated_device);
+    if(nfc_device_get_protocol(generated_device) != NfcProtocolMfClassic) {
         FURI_LOG_E(CITYCOM_FUZZER_TAG, "Mifare Classic data missing");
+        nfc_device_free(generated_device);
         citycom_fuzzer_release_nfc(app);
         citycom_fuzzer_set_status(app, CitycomFuzzerStateError, "Card data missing");
         return false;
     }
 
-    citycom_fuzzer_setup_card(mf);
+    nfc_device_copy_data(generated_device, NfcProtocolMfClassic, app->card_data);
+    nfc_device_free(generated_device);
+    citycom_fuzzer_setup_card(app->card_data);
     return true;
 }
 
@@ -251,33 +247,6 @@ static NfcCommand citycom_fuzzer_listener_callback(NfcGenericEvent event, void* 
     UNUSED(event);
     UNUSED(context);
     return NfcCommandContinue;
-}
-
-static bool citycom_fuzzer_apply_uid_to_rf(CitycomFuzzerApp* app) {
-    if(!app->listener_running || !app->nfc) {
-        return false;
-    }
-
-    MfClassicData* mf = citycom_fuzzer_get_mf(app);
-    if(!mf || !mf->iso14443_3a_data) {
-        return false;
-    }
-
-    if(app->listener) {
-        MfClassicData* listener_mf =
-            (MfClassicData*)nfc_listener_get_data(app->listener, NfcProtocolMfClassic);
-        if(!citycom_fuzzer_set_card_uid(listener_mf, app->uid)) {
-            return false;
-        }
-    }
-
-    const NfcError err = nfc_iso14443a_listener_set_col_res_data(
-        app->nfc,
-        mf->iso14443_3a_data->uid,
-        mf->iso14443_3a_data->uid_len,
-        mf->iso14443_3a_data->atqa,
-        mf->iso14443_3a_data->sak);
-    return err == NfcErrorNone;
 }
 
 static bool citycom_fuzzer_start_listener(CitycomFuzzerApp* app) {
@@ -288,13 +257,12 @@ static bool citycom_fuzzer_start_listener(CitycomFuzzerApp* app) {
         return false;
     }
 
-    MfClassicData* mf = citycom_fuzzer_get_mf(app);
-    if(!mf) {
+    if(!app->card_data) {
         citycom_fuzzer_set_status(app, CitycomFuzzerStateError, "Card data missing");
         return false;
     }
 
-    app->listener = nfc_listener_alloc(app->nfc, NfcProtocolMfClassic, mf);
+    app->listener = nfc_listener_alloc(app->nfc, NfcProtocolMfClassic, app->card_data);
     if(!app->listener) {
         FURI_LOG_E(CITYCOM_FUZZER_TAG, "Listener allocation failed");
         citycom_fuzzer_set_status(app, CitycomFuzzerStateError, "Listener allocation failed");
@@ -302,21 +270,16 @@ static bool citycom_fuzzer_start_listener(CitycomFuzzerApp* app) {
     }
 
     nfc_listener_start(app->listener, citycom_fuzzer_listener_callback, app);
+    /* Let the NFC worker reach Running before the app can stop it. */
+    furi_thread_yield();
     app->listener_running = true;
-
-    if(!citycom_fuzzer_apply_uid_to_rf(app)) {
-        FURI_LOG_E(CITYCOM_FUZZER_TAG, "RF setup failed");
-        citycom_fuzzer_stop_listener(app);
-        citycom_fuzzer_set_status(app, CitycomFuzzerStateError, "RF setup failed");
-        return false;
-    }
 
     notification_message(app->notifications, &sequence_blink_start_cyan);
     citycom_fuzzer_set_status(app, CitycomFuzzerStateEmulating, "NFC emulation ON");
     return true;
 }
 
-static void citycom_fuzzer_stop_listener(CitycomFuzzerApp* app) {
+static void citycom_fuzzer_stop_listener(CitycomFuzzerApp* app, bool notify) {
     if(!app->listener) {
         return;
     }
@@ -324,7 +287,7 @@ static void citycom_fuzzer_stop_listener(CitycomFuzzerApp* app) {
     if(app->listener_running) {
         nfc_listener_stop(app->listener);
         app->listener_running = false;
-        if(app->notifications) {
+        if(notify && app->notifications) {
             notification_message(app->notifications, &sequence_blink_stop);
         }
     }
@@ -360,14 +323,12 @@ static bool citycom_fuzzer_apply_random_uid(CitycomFuzzerApp* app) {
         return false;
     }
 
-    if(!app->listener_running) {
-        if(!citycom_fuzzer_start_listener(app)) {
-            return false;
-        }
-    } else if(!citycom_fuzzer_apply_uid_to_rf(app)) {
-        FURI_LOG_E(CITYCOM_FUZZER_TAG, "RF update failed");
-        citycom_fuzzer_stop_listener(app);
-        citycom_fuzzer_set_status(app, CitycomFuzzerStateError, "RF update failed");
+    /* The listener owns a snapshot of card_data, so replace it after updates. */
+    if(app->listener_running) {
+        citycom_fuzzer_stop_listener(app, false);
+    }
+
+    if(!citycom_fuzzer_start_listener(app)) {
         return false;
     }
 
@@ -527,7 +488,7 @@ static void citycom_fuzzer_free(CitycomFuzzerApp* app) {
         return;
     }
 
-    citycom_fuzzer_stop_listener(app);
+    citycom_fuzzer_stop_listener(app, true);
     citycom_fuzzer_release_nfc(app);
 
     if(app->gui && app->view_port && app->view_port_attached) {
